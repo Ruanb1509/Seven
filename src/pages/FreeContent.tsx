@@ -48,6 +48,9 @@ const Loading = () => (
   </div>
 );
 
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY = 1000;
+
 function Freecontent() {
   const navigate = useNavigate();
   const [links, setLinks] = useState<LinkItem[]>([]);
@@ -64,15 +67,21 @@ function Freecontent() {
   const [hasMoreContent, setHasMoreContent] = useState(true);
   const [searchLoading, setSearchLoading] = useState(false);
   const [totalPages, setTotalPages] = useState(1);
+  const [error, setError] = useState<string | null>(null);
   const { theme } = useTheme();
 
   useEffect(() => {
     document.title = "Sevenxleaks";
   }, []);
 
-  const fetchContent = async (page: number, isLoadMore = false) => {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const fetchContentWithRetry = async (
+    page: number,
+    isLoadMore = false,
+    retryCount = 0
+  ): Promise<PaginatedResponse | null> => {
     try {
-      setLoading(true);
       const params = new URLSearchParams({
         page: page.toString(),
         search: searchName,
@@ -88,40 +97,69 @@ function Freecontent() {
         {
           headers: {
             'x-api-key': `${import.meta.env.VITE_FRONTEND_API_KEY}`
-          }
+          },
+          timeout: 10000 // 10 second timeout
         }
       );
 
-      const { data, totalPages } = response.data;
-      
-      if (isLoadMore) {
-        setLinks(prev => [...prev, ...data]);
-        setFilteredLinks(prev => [...prev, ...data]);
-      } else {
-        setLinks(data);
-        setFilteredLinks(data);
+      setError(null);
+      return response.data;
+    } catch (error) {
+      if (retryCount < MAX_RETRIES) {
+        const delay = INITIAL_RETRY_DELAY * Math.pow(2, retryCount);
+        await sleep(delay);
+        return fetchContentWithRetry(page, isLoadMore, retryCount + 1);
       }
 
-      setTotalPages(totalPages);
-      setHasMoreContent(page < totalPages);
+      if (axios.isAxiosError(error)) {
+        if (error.code === 'ECONNABORTED') {
+          setError('Request timed out. Please check your internet connection.');
+        } else if (!error.response) {
+          setError('Network error. Please check your internet connection and try again.');
+        } else {
+          setError('An error occurred while fetching content. Please try again later.');
+        }
+      } else {
+        setError('An unexpected error occurred. Please try again later.');
+      }
+      return null;
+    }
+  };
+
+  const fetchContent = async (page: number, isLoadMore = false) => {
+    try {
+      setLoading(true);
+      const response = await fetchContentWithRetry(page, isLoadMore);
       
-      // Extract categories from the response
-      const uniqueCategories = Array.from(
-        new Set(data.map(item => item.category))
-      ).map(category => ({
-        id: category,
-        name: category,
-        category: category,
-      }));
+      if (response) {
+        const { data, totalPages } = response;
+        
+        if (isLoadMore) {
+          setLinks(prev => [...prev, ...data]);
+          setFilteredLinks(prev => [...prev, ...data]);
+        } else {
+          setLinks(data);
+          setFilteredLinks(data);
+        }
 
-      setCategories(prev => {
-        const existingCategories = new Set(prev.map(c => c.category));
-        const newCategories = uniqueCategories.filter(c => !existingCategories.has(c.category));
-        return [...prev, ...newCategories];
-      });
+        setTotalPages(totalPages);
+        setHasMoreContent(page < totalPages);
+        
+        // Extract categories from the response
+        const uniqueCategories = Array.from(
+          new Set(data.map(item => item.category))
+        ).map(category => ({
+          id: category,
+          name: category,
+          category: category,
+        }));
 
-    } catch (error) {
-      console.error("Error fetching content:", error);
+        setCategories(prev => {
+          const existingCategories = new Set(prev.map(c => c.category));
+          const newCategories = uniqueCategories.filter(c => !existingCategories.has(c.category));
+          return [...prev, ...newCategories];
+        });
+      }
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -165,17 +203,17 @@ function Freecontent() {
 
   const recentLinks = filteredLinks.slice(0, 5);
 
-const groupedLinks: { [key: string]: LinkItem[] } = {};
+  const groupedLinks: { [key: string]: LinkItem[] } = {};
 
-filteredLinks
-  .sort((a, b) => new Date(b.postDate).getTime() - new Date(a.postDate).getTime())
-  .forEach((link) => {
-    const formattedDate = formatDate(link.postDate);
-    if (!groupedLinks[formattedDate]) {
-      groupedLinks[formattedDate] = [];
-    }
-    groupedLinks[formattedDate].push(link);
-  });
+  filteredLinks
+    .sort((a, b) => new Date(b.postDate).getTime() - new Date(a.postDate).getTime())
+    .forEach((link) => {
+      const formattedDate = formatDate(link.postDate);
+      if (!groupedLinks[formattedDate]) {
+        groupedLinks[formattedDate] = [];
+      }
+      groupedLinks[formattedDate].push(link);
+    });
 
   const handleClosePopup = () => {
     setShowPopup(false);
@@ -183,6 +221,11 @@ filteredLinks
 
   const handleBecomeVIP = () => {
     navigate("/plans");
+  };
+
+  const handleRetry = () => {
+    setError(null);
+    fetchContent(currentPage);
   };
 
   return (
@@ -330,6 +373,30 @@ filteredLinks
         <div className="space-y-8">
           {loading ? (
             <Loading />
+          ) : error ? (
+            <div className={`text-center py-16 rounded-3xl border ${
+              theme === 'dark'
+                ? 'bg-gray-800 border-gray-700'
+                : 'bg-white border-gray-200'
+            }`}>
+              <div className="text-red-400 mb-6">
+                <X className="w-16 h-16 mx-auto" />
+              </div>
+              <h3 className={`text-2xl font-bold mb-3 ${
+                theme === 'dark' ? 'text-white' : 'text-gray-900'
+              }`}>
+                Connection Error
+              </h3>
+              <p className="text-gray-400 mb-6">
+                {error}
+              </p>
+              <button
+                onClick={handleRetry}
+                className="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+              >
+                Try Again
+              </button>
+            </div>
           ) : Object.keys(groupedLinks).length > 0 ? (
             <>
               {Object.keys(groupedLinks)
